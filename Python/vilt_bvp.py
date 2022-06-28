@@ -663,3 +663,33 @@ def rates(t, y, mu):
     dydt = np.hstack([v,a])
 
     return dydt
+
+
+def calc_theta(sv1, sv2, C):
+    '''
+    Calculate the parameters required for the VILT solver from the planet position
+    '''
+
+    # Calculate 
+    if C == -1: # High -> Low
+        r_L = norm(sv2[0:3])
+        r_H = norm(sv1[0:3])
+        sv1_unit = sv1[0:3]/r_H
+        sv2_unit = sv2[0:3]/r_L
+    elif C == 1: #low -> High
+        r_L = norm(sv1[0:3])
+        r_H = norm(sv2[0:3])       
+        sv1_unit = sv1[0:3]/r_L
+        sv2_unit = sv2[0:3]/r_H      
+        
+    # calculate sv1 -> sv2 [0 2*pi]
+    theta = np.arccos(np.dot(sv1_unit, sv2_unit))  # [0, pi] 
+    cross_12 = np.cross(sv1_unit, sv2_unit)
+    
+    # print for debug
+    # disp(['calc theta: ',num2str(rad2deg(theta)), '  cross(3): ', num2str(cross_12(3),'#.4f')]);
+    
+    if cross_12[2] < 0:  # z < 0: clock wise -> change to counter clock wise
+        theta = 2*np.pi - theta
+
+    return r_L, r_H, theta
