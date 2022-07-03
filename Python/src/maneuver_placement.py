@@ -27,14 +27,18 @@ def calc_true_anom_from_rv(R0, v0, mu):
 
 
 def true_to_mean(nu, e):
-    E = np.arctan2(np.sqrt(1 - e**2) * np.sin(nu), (e + np.cos(nu)))
-    if E < 0:
-        E = E + 2*np.pi  # convert to [0,2*np.pi]
-    M = E - e * np.sin(E)
+    tmp = np.sqrt(1 - e**2) * np.sin(nu)
+    if tmp < 1e-8:
+        M = nu
+    else:
+        E = np.arctan2(tmp, (e + np.cos(nu)))
+        if E < 0:
+            E = E + 2*np.pi  # convert to [0,2*np.pi]
+        M = E - e * np.sin(E)
 
-    # account for multiple rev
-    # Todo: Do we need this?
-    M = M + 2 * np.pi * (nu // (2 * np.pi))
+        # account for multiple rev
+        # Todo: Do we need this?
+        M = M + 2 * np.pi * (nu // (2 * np.pi))
 
     return M
 
@@ -69,7 +73,6 @@ def manuever_placement(R0, Rf, v0, vf, mu, dJ_dV_func, debug=False):
     """
 
     # 2. compute partials of J with respect to v0, vf ----------------
-    # Todo: implement this for various objectives
     dJ_dV0, dJ_DVf = dJ_dV_func(v0, vf)  # in RTN frame
 
     # 3. solve for A - F -----------------------------------------------
@@ -287,8 +290,13 @@ def flight_time_and_velocity(R0, Rf, t0, tf, mu, dV_norm, theta_0m, theta_0f, dV
 
         t_mf = (mu * chi2 + (V_R1 + dV_R)*r_m - V_Rf*rf)/alpha_2 + N2 * mu/np.sqrt(alpha_2**3)
 
+        if np.iscomplex(t_0m):
+            t_0m = -1000.0
         if t_0m < 0:
             t_0m = -1000.0
+
+        if np.iscomplex(t_mf):
+            t_mf = -1000.0
         if t_mf < 0:
             t_mf = -1000.0
 
@@ -350,23 +358,82 @@ def flight_time_and_velocity(R0, Rf, t0, tf, mu, dV_norm, theta_0m, theta_0f, dV
                 tof_diff = compute_tof_diff(lb)
                 tof_diff_prev = copy.deepcopy(tof_diff)
                 change_lb = True
+                change_ub = True
+
                 while change_lb:
                     if np.isnan(tof_diff) or tof_diff < -500:
+                        # lb enters the nan region -> determine lb that does not make nan
                         lb = lb + 0.1 * V_T1_guess
-                        ub = 2.0 * V_T1_guess
+                        alpha = 0.01
+                        max_iter = 100
+                        iter = 0
+                        while (np.isnan(tof_diff) or tof_diff < -500):
+                            iter +=1
+                            lb_try = lb * (1 - alpha)
+                            tof_diff = compute_tof_diff(lb_try)
+                            alpha = alpha * 0.95
+                            if iter == max_iter:
+                                if debug:
+                                    print("Maximum Iteration reached on lb - lb is nan")
+                                    break
+                            if not np.isnan(tof_diff) and tof_diff > -500:
+                                lb = lb_try
+                                break
+
                         change_lb = False
                     else:
-                        if np.sign(tof_diff_prev) != np.sign(tof_diff):
+                        if np.sign(tof_diff_prev) != np.sign(tof_diff):  # sign changes, successful
                             ub = lb + 0.1 * V_T1_guess
                             change_lb = False
+                            change_ub = False
                         else:  # go to next step
                             tof_diff_prev = copy.deepcopy(tof_diff)
                             lb = lb - 0.1 * V_T1_guess
                             tof_diff = compute_tof_diff(lb)
 
                     if lb == 0.5*V_T1_guess:
-                        ub = 2.0 * V_T1_guess
+                        print("Maximum Iteration reached on lb - lb small")
                         break
+
+                # next determine upper bound
+                if change_ub:
+                    ub = lb + 0.1 * V_T1_guess
+                    tof_diff = compute_tof_diff(ub)
+                    tof_diff_prev = copy.deepcopy(tof_diff)
+
+                    while change_ub:
+                        if np.isnan(tof_diff) or tof_diff < -500:
+                            # ub enters the nan region -> determine lb that does not make nan
+                            ub = ub - 0.1 * V_T1_guess
+                            alpha = 0.01
+                            max_iter = 100
+                            iter = 0
+                            while np.isnan(tof_diff) or tof_diff < -500:
+                                iter += 1
+                                ub_try = ub * (1 + alpha)
+                                tof_diff = compute_tof_diff(ub_try)
+                                alpha = alpha * 0.95
+                                if iter == max_iter:
+                                    if debug:
+                                        print("Maximum Iteration reached on ub - ub is nan")
+                                        break
+                                if not np.isnan(tof_diff) and tof_diff > -500:
+                                    ub = ub_try
+                                    break
+
+                            change_ub = False
+                        else:
+                            if np.sign(tof_diff_prev) != np.sign(tof_diff):  # sign changes, successful
+                                lb = ub - 0.1 * V_T1_guess
+                                change_ub = False
+                            else:  # go to next step
+                                tof_diff_prev = copy.deepcopy(tof_diff)
+                                ub = ub + 0.1 * V_T1_guess
+                                tof_diff = compute_tof_diff(lb)
+
+                        if ub == 2.0 * V_T1_guess:
+                            print("Maximum Iteration reached on ub - ub large")
+                            break
 
                 sol = optimize.root_scalar(compute_tof_diff, bracket=(lb, ub), method='brentq')
 
@@ -384,7 +451,8 @@ def flight_time_and_velocity(R0, Rf, t0, tf, mu, dV_norm, theta_0m, theta_0f, dV
         T = 0.0
 
     if debug:
-        V_T1s = np.linspace(0.1 * V_T1_guess, 2 * V_T1_guess, 500)
+        # V_T1s = np.linspace(0.1 * V_T1_guess, 2 * V_T1_guess, 500)
+        V_T1s = np.linspace(lb, ub, 500)
         diffs = np.zeros_like(V_T1s)
         plt.figure()
         for i, V_T1 in enumerate(V_T1s):
@@ -405,7 +473,8 @@ def flight_time_and_velocity(R0, Rf, t0, tf, mu, dV_norm, theta_0m, theta_0f, dV
     return succ, eta, V0, Vf, T
 
 
-def solve_arc(body_0, body_f, T_START, tf, dV_norm_list, mu, objective_type=1, debug=False):
+def solve_arc(body_0, body_f, T_START, tf, dV_norm_list, mu, objective_type=1, safe_rp_ratio=1.1,
+              debug=False):
     """
     Generate trajectory arc dataset by varying the DV magnitude
     """
@@ -439,7 +508,7 @@ def solve_arc(body_0, body_f, T_START, tf, dV_norm_list, mu, objective_type=1, d
     r_P0, V_P0 = body_0.eph(t_P0)
     r_P0 = np.array(r_P0)/r_ref
     V_P0 = np.array(V_P0)/v_ref
-    rmin0 = body_0.radius * 1.1 / r_ref
+    rmin0 = body_0.radius * safe_rp_ratio / r_ref
     mu_0 = body_0.mu_self / mu_ref
 
     t_Pf = epoch(T_START.mjd2000 + tf)
@@ -448,7 +517,7 @@ def solve_arc(body_0, body_f, T_START, tf, dV_norm_list, mu, objective_type=1, d
     V_Pf = np.array(V_Pf)/ v_ref
     vpf = np.linalg.norm(V_Pf)
     V_Pf_hat = V_Pf / vpf
-    rminf = body_f.radius * 1.1 / r_ref
+    rminf = body_f.radius * safe_rp_ratio / r_ref
     mu_f = body_f.mu_self / mu_ref
 
     # 1. solve lambert problem -----------------------------------------
